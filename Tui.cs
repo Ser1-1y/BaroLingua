@@ -4,6 +4,12 @@ namespace Translate;
 
 public static class Tui
 {
+    public enum BoolAction
+    {
+        True,
+        False,
+    }
+    
     public static T? Choice<T>(Option<T>[] options, int selected = 0, string title = "") 
         where T : struct, Enum
     {

@@ -6,14 +6,6 @@ public enum MenuResult
     Exit,
 }
 
-public enum Bool
-{
-    Yes,
-    No,
-    On,
-    Off,
-}
-
 public enum Settings
 {
     Continue,
@@ -38,17 +30,17 @@ public enum StartMenuAction
 
 public static class Menu
 {
-    private static readonly Tui.Option<Bool>[] BoolAction = [
-        new("Yes", Bool.Yes), 
-        new("No", Bool.No),
+    private static readonly Tui.Option<Tui.BoolAction>[] BoolChoice = [
+        new("Yes", Tui.BoolAction.True), 
+        new("No", Tui.BoolAction.False),
     ];
     
-    private static readonly Tui.Option<Bool>[] OnOffAction = [
-        new("On", Bool.On), 
-        new("Off", Bool.Off),
+    private static readonly Tui.Option<Tui.BoolAction>[] OnOffChoice = [
+        new("On", Tui.BoolAction.True), 
+        new("Off", Tui.BoolAction.False),
     ];
 
-    private static readonly Tui.Option<Settings>[] BaseSettingsActions = [
+    private static readonly Tui.Option<Settings>[] BaseSettingsChoice = [
         new("Continue", Settings.Continue),
         new("Show Translated Strings", Settings.ShowTranslated),
         new("Change File Path", Settings.ChangeFilePath),
@@ -58,10 +50,10 @@ public static class Menu
     ];
 
     private static bool VisualYesNoMenu(string title) =>
-        Tui.Choice(BoolAction, title: title) == Bool.Yes;
+        Tui.Choice(BoolChoice, title: title) == Tui.BoolAction.True;
 
     private static bool VisualOnOffMenu(string title) =>
-        Tui.Choice(OnOffAction, title: title) == Bool.On;
+        Tui.Choice(OnOffChoice, title: title) == Tui.BoolAction.True;
 
     public static void ConfigMenu(string configPath)
     {
@@ -82,7 +74,7 @@ public static class Menu
         {
             Console.Clear();
             
-            var choices = new List<Tui.Option<Settings>>(BaseSettingsActions);
+            var choices = new List<Tui.Option<Settings>>(BaseSettingsChoice);
 
             if (config.DebugMode)
             {
@@ -194,7 +186,6 @@ public static class Menu
             case StartMenuAction.Exit:
             case null:
                 return VisualYesNoMenu("Are you sure you want to exit?") ? MenuResult.Exit : MenuResult.Continue;
-                
             default:
                 return MenuResult.Continue;
         }
