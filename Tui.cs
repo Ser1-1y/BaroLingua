@@ -1,175 +1,311 @@
 using System.Text;
+using Spectre.Console;
 
 namespace Translate;
 
 public static class Tui
 {
-    public enum BoolAction
-    {
-        True,
-        False,
-    }
-    
-    public static T? Choice<T>(Option<T>[] options, int selected = 0, string title = "") 
-        where T : struct, Enum
-    {
-        Console.CursorVisible = false;
+	public static bool ShowMenuNumbers { get; set; } = true;
 
-        while (true)
-        {
-            DrawChoiceMenu(options, selected, title);
+	public static async Task<T?> ChoiceAsync<T>(Option<T>[] options, string title = "",
+		bool titlePadding = false, CancellationToken ct = default)
+		where T : struct, Enum
+	{
+		var stringOptions = options.Select(o => o.Title).ToArray();
+		var index = await RunMenuAsync(stringOptions, 0, title, titlePadding, ct);
 
-            var key = Console.ReadKey(true).Key;
+		return index.HasValue ? options[index.Value].Id : null;
+	}
 
-            // ReSharper disable once SwitchStatementMissingSomeEnumCasesNoDefault
-            switch (key)
-            {
-                case ConsoleKey.RightArrow:
-                case ConsoleKey.UpArrow:
-                    selected = (selected - 1 + options.Length) % options.Length;
-                    break;
+	private static async Task<int?> RunMenuAsync(string[] options, int defaultIndex, string title, bool titlePadding,
+		CancellationToken ct)
+	{
+		if (options.Length == 0 || options.All(string.IsNullOrEmpty))
+			return null;
 
-                case ConsoleKey.LeftArrow:
-                case ConsoleKey.DownArrow:
-                    selected = (selected + 1) % options.Length;
-                    break;
+		var selected = Math.Clamp(defaultIndex, 0, options.Length - 1);
 
-                case ConsoleKey.Enter:
-                    Console.CursorVisible = true;
-                    Console.Clear();
-                    return options[selected].Id;
-                case ConsoleKey.Escape:
-                    return null;
-            }
-        }
-    }
+		if (string.IsNullOrEmpty(options[selected]))
+			selected = GetNextValidIndex(options, selected, 1) ?? 0;
 
-    private static void DrawChoiceMenu<T>(
-        Option<T>[] options,
-        int selected,
-        string title
-    ) where T : struct, Enum
-    {
-        Console.Clear();
+		Console.CursorVisible = false;
+		AnsiConsole.Clear();
 
-        if (!string.IsNullOrWhiteSpace(title))
-            Console.WriteLine($"--- {title} ---\n");
+		var startTop = Console.CursorTop;
 
-        for (var i = 0; i < options.Length; i++)
-            DrawSelectableItem(options[i].Title, i == selected);
-    }
+		try
+		{
+			while (true)
+			{
+				ct.ThrowIfCancellationRequested();
+				Console.SetCursorPosition(0, startTop);
 
-    private static void DrawSelectableItem(string text, bool selected)
-    {
-        if (selected)
-        {
-            Console.BackgroundColor = ConsoleColor.DarkBlue;
-            Console.ForegroundColor = ConsoleColor.White;
+				if (!string.IsNullOrWhiteSpace(title))
+				{
+					var displayTitle = titlePadding ? $"--- {title} ---" : title;
+					AnsiConsole.MarkupLine(displayTitle);
+				}
 
-            Console.WriteLine($"> {text} <");
+				var consoleWidth = Console.IsOutputRedirected ? 80 : Console.WindowWidth;
+				var displayNumber = 1;
 
-            Console.ResetColor();
-        }
-        else
-            Console.WriteLine($"  {text}");
-    }
-    
-    public static string Input(string defaultText = "", string? escapeValue = null)
-    {
-        var buffer = new StringBuilder(defaultText);
-        var cursorPos = buffer.Length;
+				for (var i = 0; i < options.Length; i++)
+				{
+					if (string.IsNullOrEmpty(options[i]))
+					{
+						Console.WriteLine(new string(' ', Math.Max(0, consoleWidth - 1)));
+						continue;
+					}
 
-        void RedrawInput()
-        {
-            Console.CursorVisible = false;
-            Console.Write("\r" + buffer + "\e[K");
-            Console.SetCursorPosition(cursorPos, Console.CursorTop);
-            Console.CursorVisible = true;
-        }
+					var prefix = "";
+					if (ShowMenuNumbers)
+					{
+						prefix = displayNumber <= 9
+							? $"{displayNumber}. "
+							: $"↑{displayNumber - 9}.";
+					}
 
-        bool IsDelimiter(char c) => 
-            char.IsWhiteSpace(c) || c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar;
+					var itemText = Markup.Escape(options[i]);
 
-        int GetPrevWordPos(int pos)
-        {
-            while (pos > 0 && IsDelimiter(buffer[pos - 1])) pos--;
-            while (pos > 0 && !IsDelimiter(buffer[pos - 1])) pos--;
-            return pos;
-        }
+					var line = i == selected ? $"[blue] > {prefix}{itemText} [/]" : $"   {prefix}{itemText}";
 
-        int GetNextWordPos(int pos)
-        {
-            while (pos < buffer.Length && IsDelimiter(buffer[pos])) pos++;
-            while (pos < buffer.Length && !IsDelimiter(buffer[pos])) pos++;
-            return pos;
-        }
+					var plainTextLength = 3 + prefix.Length + options[i].Length + (i == selected ? 1 : 0);
+					var padding = Math.Max(0, consoleWidth - 1 - plainTextLength);
 
-        Console.Write(buffer.ToString());
+					AnsiConsole.MarkupLine(line + new string(' ', padding));
+					displayNumber++;
+				}
 
-        while (true)
-        {
-            var key = Console.ReadKey(intercept: true);
-            var isCtrl = key.Modifiers.HasFlag(ConsoleModifiers.Control);
+				while (!Console.KeyAvailable)
+				{
+					await Task.Delay(20, ct);
+					ct.ThrowIfCancellationRequested();
+				}
 
-            // ReSharper disable once SwitchStatementHandlesSomeKnownEnumValuesWithDefault
-            switch (key.Key)
-            {
-                case ConsoleKey.Enter:
-                    Console.WriteLine();
-                    return buffer.ToString();
+				var key = Console.ReadKey(true);
 
-                case ConsoleKey.Escape:
-                    Console.WriteLine();
-                    return escapeValue ?? defaultText;
+				if (key.Key == ConsoleKey.Escape
+					|| (key.Modifiers.HasFlag(ConsoleModifiers.Control)
+						&& key.Key == ConsoleKey.C))
+					return null;
+				switch (key.Key)
+				{
+					case ConsoleKey.Enter:
+						return selected;
+					case ConsoleKey.UpArrow:
+					case ConsoleKey.LeftArrow:
+						selected = GetNextValidIndex(options, selected, -1) ?? selected;
+						break;
+					case ConsoleKey.DownArrow:
+					case ConsoleKey.RightArrow:
+						selected = GetNextValidIndex(options, selected, 1) ?? selected;
+						break;
+				}
 
-                case ConsoleKey.Backspace when cursorPos > 0:
-                    var backTo = isCtrl ? GetPrevWordPos(cursorPos) : cursorPos - 1;
-                    buffer.Remove(backTo, cursorPos - backTo);
-                    cursorPos = backTo;
-                    RedrawInput();
-                    break;
+				if (!ShowMenuNumbers)
+					continue;
+				int? targetDigit = null;
 
-                case ConsoleKey.Delete when cursorPos < buffer.Length:
-                    var delTo = isCtrl ? GetNextWordPos(cursorPos) : cursorPos + 1;
-                    buffer.Remove(cursorPos, delTo - cursorPos);
-                    RedrawInput();
-                    break;
+				switch (key.KeyChar)
+				{
+					case '!': targetDigit = 10; break;
+					case '@':
+					case '"': targetDigit = 11; break;
+					case '#':
+					case '№': targetDigit = 12; break;
+					case '$':
+					case ';': targetDigit = 13; break;
+					case '%': targetDigit = 14; break;
+					case '^':
+					case ':': targetDigit = 15; break;
+					case '&':
+					case '?': targetDigit = 16; break;
+					case '*': targetDigit = 17; break;
+					case '(': targetDigit = 18; break;
+				}
 
-                case ConsoleKey.LeftArrow when cursorPos > 0:
-                    cursorPos = isCtrl ? GetPrevWordPos(cursorPos) : cursorPos - 1;
-                    RedrawInput();
-                    break;
+				if (!targetDigit.HasValue)
+				{
+					var isShift = (key.Modifiers & ConsoleModifiers.Shift) != 0;
 
-                case ConsoleKey.RightArrow when cursorPos < buffer.Length:
-                    cursorPos = isCtrl ? GetNextWordPos(cursorPos) : cursorPos + 1;
-                    RedrawInput();
-                    break;
+					switch (key.Key)
+					{
+						case >= ConsoleKey.D1 and <= ConsoleKey.D9:
+						{
+							targetDigit = key.Key - ConsoleKey.D1 + 1;
+							if (isShift) targetDigit += 9;
+							break;
+						}
+						case >= ConsoleKey.NumPad1 and <= ConsoleKey.NumPad9:
+						{
+							targetDigit = key.Key - ConsoleKey.NumPad1 + 1;
+							if (isShift) targetDigit += 9;
+							break;
+						}
+					}
+				}
 
-                case ConsoleKey.Home:
-                    cursorPos = 0;
-                    RedrawInput();
-                    break;
+				if (!targetDigit.HasValue)
+					continue;
+				var targetIndex = GetIndexByDisplayNumber(options, targetDigit.Value);
+				if (targetIndex != -1)
+					return targetIndex;
+			}
+		}
+		catch (OperationCanceledException)
+		{
+			return null;
+		}
+		finally
+		{
+			Console.CursorVisible = true;
+		}
+	}
 
-                case ConsoleKey.End:
-                    cursorPos = buffer.Length;
-                    RedrawInput();
-                    break;
+	private static int? GetNextValidIndex(string[] options, int current, int step)
+	{
+		var next = current + step;
 
-                default:
-                    if (!char.IsControl(key.KeyChar))
-                    {
-                        buffer.Insert(cursorPos++, key.KeyChar);
-                        RedrawInput();
-                    }
-                    break;
-            }
-        }
-    }
-    
-    public class Option<T>(string title, T id)
-        where T : struct, Enum
-    {
-        public string Title { get; } = title;
-        public T Id { get; } = id;
-    }
+		while (next >= 0 && next < options.Length)
+		{
+			if (!string.IsNullOrEmpty(options[next]))
+				return next;
+			next += step;
+		}
+
+		if (step > 0)
+		{
+			for (var i = 0; i < current; i++)
+			{
+				if (!string.IsNullOrEmpty(options[i]))
+					return i;
+			}
+		}
+		else
+		{
+			for (var i = options.Length - 1; i > current; i--)
+			{
+				if (!string.IsNullOrEmpty(options[i]))
+					return i;
+			}
+		}
+
+		return null;
+	}
+
+	private static int GetIndexByDisplayNumber(string[] options, int targetNumber)
+	{
+		var currentNumber = 1;
+		for (var i = 0; i < options.Length; i++)
+		{
+			if (string.IsNullOrEmpty(options[i]))
+				continue;
+			if (currentNumber == targetNumber)
+				return i;
+			currentNumber++;
+		}
+
+		return -1;
+	}
+
+	public static string? Input(string title = "", string defaultText = "", string? escapeValue = null)
+	{
+		var buffer = new StringBuilder(defaultText);
+		var cursorPos = buffer.Length;
+
+		void RedrawInput()
+		{
+			Console.CursorVisible = false;
+			Console.Write($"\r{title}{buffer}\e[K");
+			Console.SetCursorPosition(title.Length + cursorPos, Console.CursorTop);
+			Console.CursorVisible = true;
+		}
+
+		RedrawInput();
+
+		while (true)
+		{
+			var key = Console.ReadKey(true);
+			switch (key.Key)
+			{
+				case ConsoleKey.Enter:
+					Console.WriteLine();
+					Console.CursorVisible = true;
+					return buffer.ToString();
+
+				case ConsoleKey.Escape:
+					Console.WriteLine();
+					Console.CursorVisible = true;
+					return escapeValue;
+
+				case ConsoleKey.C when (key.Modifiers & ConsoleModifiers.Control) != 0:
+					Console.WriteLine();
+					Console.CursorVisible = true;
+					return null;
+
+				case ConsoleKey.Backspace:
+					if (cursorPos > 0)
+					{
+						buffer.Remove(cursorPos - 1, 1);
+						cursorPos--;
+						RedrawInput();
+					}
+
+					break;
+
+				case ConsoleKey.Delete:
+					if (cursorPos < buffer.Length)
+					{
+						buffer.Remove(cursorPos, 1);
+						RedrawInput();
+					}
+
+					break;
+
+				case ConsoleKey.LeftArrow:
+					if (cursorPos > 0)
+					{
+						cursorPos--;
+						RedrawInput();
+					}
+
+					break;
+
+				case ConsoleKey.RightArrow:
+					if (cursorPos < buffer.Length)
+					{
+						cursorPos++;
+						RedrawInput();
+					}
+
+					break;
+
+				case ConsoleKey.Home:
+					cursorPos = 0;
+					RedrawInput();
+					break;
+
+				case ConsoleKey.End:
+					cursorPos = buffer.Length;
+					RedrawInput();
+					break;
+
+				case ConsoleKey.Tab:
+					break;
+
+				default:
+					if (!char.IsControl(key.KeyChar))
+					{
+						buffer.Insert(cursorPos, key.KeyChar);
+						cursorPos++;
+						RedrawInput();
+					}
+
+					break;
+			}
+		}
+	}
 }
+
+public record Option<T>(string Title, T Id) where T
+	: struct, Enum;

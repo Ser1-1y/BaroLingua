@@ -2,57 +2,40 @@
 
 public static class Helpers
 {
-    public static string GetFilePath(Config config, string configPath)
-    {
-        var validPath = TryProcessPath(config.LastFile, config, configPath);
-        if (validPath != null)
-            return validPath;
+	public static string GetFilePath(Config config, string configPath)
+	{
+		var validPath = TryProcessPath(config.LastFile, config, configPath);
+		if (validPath != null)
+			return validPath;
 
-        while (true)
-        {
-            var rawPath = Menu.ChangeFilePath();
-            validPath = TryProcessPath(rawPath, config, configPath);
-            
-            if (validPath != null)
-                return validPath;
+		while (true)
+		{
+			var rawPath = Menu.ChangeFilePath();
+			validPath = TryProcessPath(rawPath, config, configPath);
 
-            Console.WriteLine("Could not find such file. Press any key to retry.");
-            Console.ReadKey();
-        }
-    }
+			if (validPath != null)
+				return validPath;
 
-    private static string? TryProcessPath(string? path, Config config, string configPath)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return null;
+			Console.WriteLine("Could not find such file. Press any key to retry.");
+			Console.ReadKey();
+		}
+	}
 
-        if (path.StartsWith('"') && path.EndsWith('"'))
-            path = path[1..^1];
+	private static string? TryProcessPath(string? path, Config config, string configPath)
+	{
+		if (string.IsNullOrWhiteSpace(path))
+			return null;
 
-        if (!path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
-            path += ".xml";
+		if (path.StartsWith('"') && path.EndsWith('"'))
+			path = path[1..^1];
 
-        if (!File.Exists(path)) 
-            return null;
-        config.LastFile = path;
-        Config.Write(configPath, config);
-        return path;
-    }
-}
+		if (!path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+			path += ".xml";
 
-public static class Color
-{
-    public static void Write(string text)
-    {
-        var parts = text.Split('<', '>');
-        foreach (var part in parts)
-        {
-            if (part.StartsWith('/'))
-                Console.ResetColor();
-            else if (part.StartsWith('=') && Enum.TryParse(part[1..], out ConsoleColor color))
-                Console.ForegroundColor = color;
-            else
-                Console.Write(part);
-        }
-    }
+		if (!File.Exists(path))
+			return null;
+		config.LastFile = path;
+		Config.Write(configPath, config);
+		return path;
+	}
 }
