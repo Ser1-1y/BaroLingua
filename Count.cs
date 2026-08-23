@@ -11,7 +11,11 @@ public static partial class Count
 	private static int CountLines(string path, bool cyrillic)
 	{
 		var nodes = Document.Load(path);
-		return nodes.SelectNodes("//Conversation")!.Cast<XmlNode>().Count(node =>
+		var conversations = nodes.SelectNodes("//Conversation");
+		if (conversations is null)
+			return 0;
+
+		return conversations.Cast<XmlNode>().Count(node =>
 		{
 			var line = node.Attributes?["line"]?.Value ?? "";
 			return CyrillicRegex().IsMatch(line) == cyrillic;

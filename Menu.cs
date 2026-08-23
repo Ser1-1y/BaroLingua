@@ -181,7 +181,9 @@ public static class Menu
 		{
 			case StartMenuAction.Start:
 			case StartMenuAction.Continue:
-				var filePath = Helpers.GetFilePath(config, configPath);
+				var filePath = Helpers.GetFilePath(config);
+				if (filePath is null)
+					return MenuResult.Continue;
 				var result = Translation.Process(filePath, config, configPath);
 				return result == TranslationResult.ExitRequested ? MenuResult.Exit : MenuResult.Continue;
 

@@ -2,26 +2,31 @@
 
 public static class Helpers
 {
-	public static string GetFilePath(Config config, string configPath)
+	public static string? GetFilePath(Config config)
 	{
-		var validPath = TryProcessPath(config.LastFile, config, configPath);
+		var validPath = TryProcessPath(config.LastFile);
 		if (validPath != null)
 			return validPath;
 
 		while (true)
 		{
 			var rawPath = Menu.ChangeFilePath();
-			validPath = TryProcessPath(rawPath, config, configPath);
+			if (rawPath is null)
+				return config.LastFile;
+
+			validPath = TryProcessPath(rawPath);
 
 			if (validPath != null)
 				return validPath;
 
-			Console.WriteLine("Could not find such file. Press any key to retry.");
-			Console.ReadKey();
+			Console.WriteLine("Could not find such file. Press any key to retry, or Escape to go back.");
+			var key = Console.ReadKey(true);
+			if (key.Key == ConsoleKey.Escape)
+				return config.LastFile;
 		}
 	}
 
-	private static string? TryProcessPath(string? path, Config config, string configPath)
+	private static string? TryProcessPath(string? path)
 	{
 		if (string.IsNullOrWhiteSpace(path))
 			return null;
@@ -32,10 +37,8 @@ public static class Helpers
 		if (!path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
 			path += ".xml";
 
-		if (!File.Exists(path))
-			return null;
-		config.LastFile = path;
-		Config.Write(configPath, config);
-		return path;
+		return !File.Exists(path)
+			? null
+			: path;
 	}
 }
