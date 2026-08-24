@@ -30,59 +30,110 @@ internal static class Document
 		return xmlDoc;
 	}
 
-	private static string BuildTreePrefix(XmlNode node, bool isLast)
+	public static string? WriteXmlLine(string original, XmlAttribute? tags, bool showNodes, XmlNode node,
+		TreePrefix prefix)
 	{
-		var ancestorChain = new List<XmlNode>();
-		var current = node.ParentNode;
-
-		while (current != null && current.NodeType != XmlNodeType.Document)
+		if (showNodes)
 		{
-			if (current.Name == "Conversation")
-				ancestorChain.Add(current);
-			current = current.ParentNode;
+			Console.Write($"{prefix.Branch}<Conversation line=\"{original}\"");
+			Console.WriteLine(tags != null ? $" speakertags=\"{tags.Value}\">" : ">");
 		}
 
-		ancestorChain.Reverse();
+		AnsiConsole.Markup(
+			$"{prefix.Branch}[Green]Original:[/] {original} | [Green]Speaker:[/] \"{node.Attributes?["speaker"]?.Value}\"");
+		AnsiConsole.MarkupLine(tags != null ? $" [Green]Tags:[/] {tags.Value}" : "");
 
-		var prefix = ancestorChain.Select(IsLastChildConversation)
-								  .Aggregate("", (current1, isLastChild) 
-												 => current1 + (isLastChild ? "    " : "│   "));
-
-		prefix += isLast ? "└── " : "├── ";
-		return prefix;
+		return Tui.Input(prefix.Continuation, escapeValue: ExitCommand);
 	}
 
-	private static bool IsLastChildConversation(XmlNode node)
+	public static void PrintAncestorContext(XmlNode node, ConversationTree tree)
+	{
+		foreach (var ancestor in tree.AncestorsOf(node))
+		{
+			var prefix = tree.PrefixFor(ancestor);
+			var text = ancestor.Attributes?["line"]?.Value ?? "";
+			var speaker = ancestor.Attributes?["speaker"]?.Value;
+			AnsiConsole.MarkupLine(
+				$"{prefix.Branch}[Green]{text.EscapeMarkup()}[/] | [Green]Speaker:[/] \"{speaker}\"");
+		}
+	}
+}
+
+internal readonly record struct TreePrefix(string Branch, string Continuation);
+
+internal sealed class ConversationTree
+{
+	private readonly Dictionary<XmlNode, IReadOnlyList<XmlNode>> _ancestors = new();
+	private readonly Dictionary<XmlNode, TreePrefix> _prefixes = new();
+
+	public static ConversationTree Build(IEnumerable<XmlNode> conversationNodes)
+	{
+		var tree = new ConversationTree();
+		var lastChildByParent = new Dictionary<XmlNode, XmlNode?>();
+
+		foreach (var node in conversationNodes)
+		{
+			var ancestors = CollectAncestors(node);
+			tree._ancestors[node] = ancestors;
+			tree._prefixes[node] = BuildPrefix(ancestors, node, lastChildByParent);
+		}
+
+		return tree;
+	}
+
+	public TreePrefix PrefixFor(XmlNode node) => _prefixes[node];
+
+	public IReadOnlyList<XmlNode> AncestorsOf(XmlNode node) => _ancestors[node];
+
+	private static List<XmlNode> CollectAncestors(XmlNode node)
+	{
+		var ancestors = new List<XmlNode>();
+		for (var current = node.ParentNode;
+			 current is { NodeType: not XmlNodeType.Document };
+			 current = current.ParentNode)
+		{
+			if (current.Name == "Conversation")
+				ancestors.Add(current);
+		}
+
+		ancestors.Reverse();
+		return ancestors;
+	}
+
+	private static TreePrefix BuildPrefix(IReadOnlyList<XmlNode> ancestors, XmlNode node,
+		Dictionary<XmlNode, XmlNode?> lastChildByParent)
+	{
+		var indent = ancestors.Aggregate("", (acc, ancestor) =>
+											 acc + (IsLastConversationSibling(ancestor, lastChildByParent)
+												 ? "    "
+												 : "│   "));
+
+		var isLast = IsLastConversationSibling(node, lastChildByParent);
+		var branch = indent + (isLast ? "└── " : "├── ");
+		var continuation = indent + (isLast ? "    " : "│   ");
+		return new TreePrefix(branch, continuation);
+	}
+
+	private static bool IsLastConversationSibling(XmlNode node, Dictionary<XmlNode, XmlNode?> lastChildByParent)
 	{
 		var parent = node.ParentNode;
 		if (parent == null)
 			return true;
 
+		if (lastChildByParent.TryGetValue(parent, out var lastConversationChild))
+			return ReferenceEquals(node, lastConversationChild);
+		lastConversationChild = null;
 		for (var sib = parent.LastChild; sib != null; sib = sib.PreviousSibling)
 		{
-			if (sib.Name == "Conversation")
-				return ReferenceEquals(node, sib);
+			if (sib.Name != "Conversation")
+				continue;
+			lastConversationChild = sib;
+			break;
 		}
 
-		return true;
-	}
+		lastChildByParent[parent] = lastConversationChild;
 
-	public static string? WriteXmlLine(string original, XmlAttribute? tags, bool showNodes, XmlNode node,
-		bool isLast)
-	{
-		var prefix = BuildTreePrefix(node, isLast);
-
-		if (showNodes)
-		{
-			Console.Write($"{prefix}<Conversation line=\"{original}\"");
-			Console.WriteLine(tags != null ? $" speakertags=\"{tags.Value}\">" : ">");
-		}
-
-		AnsiConsole.Markup(
-			$"{prefix}[Green]Original:[/] {original} | [Green]Speaker:[/] \"{node.Attributes?["speaker"]?.Value}\"");
-		AnsiConsole.MarkupLine(tags != null ? $" [Green]Tags:[/] {tags.Value}" : "");
-
-		return Tui.Input(prefix, escapeValue: ExitCommand);
+		return ReferenceEquals(node, lastConversationChild);
 	}
 }
 
@@ -95,12 +146,11 @@ public static class Translation
 	{
 		Console.Clear();
 
-		var translatedLinesCount = 0;
 		var xmlDoc = Document.Load(filePath);
 		config.FirstTimeUsing = false;
 
-		var nodes = xmlDoc.SelectNodes("//Conversation");
-		if (nodes is null)
+		var conversationNodes = xmlDoc.SelectNodes("//Conversation")?.Cast<XmlNode>().ToList();
+		if (conversationNodes is null or { Count: 0 })
 		{
 			Console.WriteLine("[ERROR] There are no nodes.");
 			config.LastFile = null;
@@ -109,76 +159,72 @@ public static class Translation
 			return TranslationResult.BackToMenu;
 		}
 
+		var tree = ConversationTree.Build(conversationNodes);
 		var startTime = DateTime.Now;
+		var translatedLinesCount = 0;
+		var contextShown = false;
 
-		var lastSiblingMap = new Dictionary<XmlNode, bool>();
-		var convNodes = nodes.Cast<XmlNode>().ToList();
-
-		foreach (var conv in convNodes)
-		{
-			var parent = conv.ParentNode;
-			if (parent == null)
-			{
-				lastSiblingMap[conv] = true;
-				continue;
-			}
-
-			XmlNode? lastSibling = null;
-			for (var sib = parent.LastChild; sib != null; sib = sib.PreviousSibling)
-			{
-				if (sib.Name != "Conversation") 
-					continue;
-				
-				lastSibling = sib;
-				break;
-			}
-
-			lastSiblingMap[conv] = ReferenceEquals(conv, lastSibling);
-		}
-
-		foreach (var conv in convNodes)
+		foreach (var conv in conversationNodes)
 		{
 			var line = conv.Attributes?["line"];
-			var tags = conv.Attributes?["speakertags"];
-
 			if (ShouldSkipLine(line, config))
 				continue;
 
-			while (true)
+			if (!contextShown)
 			{
-				var isLast = lastSiblingMap[conv];
-				var translatedLine = Document.WriteXmlLine(line!.Value, tags, config.ShowOriginalNodes, conv, isLast);
+				Document.PrintAncestorContext(conv, tree);
+				contextShown = true;
+			}
 
-				if (translatedLine is null or Document.ExitCommand)
-				{
-					if (!Menu.ExitMenu())
-					{
-						Console.Clear();
-						continue;
-					}
+			var tags = conv.Attributes?["speakertags"];
+			var prefix = tree.PrefixFor(conv);
 
+			switch (TranslateOneLine(conv, line!, tags, config, prefix))
+			{
+				case LineOutcome.Translated:
+					translatedLinesCount++;
+					continue;
+
+				case LineOutcome.OpenSettings:
+					Document.Save(filePath, configPath, config, xmlDoc);
+					Menu.SettingsMenu(configPath, config);
+					return TranslationResult.BackToMenu;
+
+				case LineOutcome.Exit:
 					Console.Clear();
 					Document.Save(filePath, configPath, config, xmlDoc);
 					GetResults(filePath, translatedLinesCount, startTime);
 					return TranslationResult.ExitRequested;
-				}
-
-				if (translatedLine.Equals(Document.SettingsCommand, StringComparison.OrdinalIgnoreCase))
-				{
-					Document.Save(filePath, configPath, config, xmlDoc);
-					Menu.SettingsMenu(configPath, config);
-					return TranslationResult.BackToMenu;
-				}
-
-				line.Value = translatedLine;
-				translatedLinesCount++;
-				break;
 			}
 		}
 
 		Document.Save(filePath, configPath, config, xmlDoc);
 		GetResults(filePath, translatedLinesCount, startTime);
 		return TranslationResult.Completed;
+	}
+
+	private static LineOutcome TranslateOneLine(XmlNode conv, XmlAttribute line, XmlAttribute? tags, Config config,
+		TreePrefix prefix)
+	{
+		while (true)
+		{
+			var input = Document.WriteXmlLine(line.Value, tags, config.ShowOriginalNodes, conv, prefix);
+
+			if (input is null or Document.ExitCommand)
+			{
+				if (Menu.ExitMenu())
+					return LineOutcome.Exit;
+
+				Console.Clear();
+				continue;
+			}
+
+			if (input.Equals(Document.SettingsCommand, StringComparison.OrdinalIgnoreCase))
+				return LineOutcome.OpenSettings;
+
+			line.Value = input;
+			return LineOutcome.Translated;
+		}
 	}
 
 	private static bool ShouldSkipLine(XmlAttribute? line, Config config)
@@ -189,6 +235,7 @@ public static class Translation
 
 		if (!Cyrillic.IsMatch(line.Value))
 			return false;
+
 		if (config.ShowLoadedStrings)
 			Console.WriteLine($"Skipping: {line.Value}");
 		return true;
@@ -209,5 +256,12 @@ public static class Translation
 		AnsiConsole.MarkupLine($"≈ [Green]{secPerLine}[/] sec/line.");
 
 		Console.ReadKey();
+	}
+
+	private enum LineOutcome
+	{
+		Translated,
+		OpenSettings,
+		Exit,
 	}
 }

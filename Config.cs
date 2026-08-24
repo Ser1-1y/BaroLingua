@@ -16,6 +16,7 @@ public class Config
 	public string? LastFile { get; set; }
 	public bool DebugMode { get; set; }
 	public bool ShowOriginalNodes { get; set; }
+	public string? SearchDirectory { get; set; }
 
 	public static Config TryGet()
 	{

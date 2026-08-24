@@ -13,6 +13,7 @@ public enum Settings
 	Continue,
 	ShowTranslated,
 	ChangeFilePath,
+	ChangeSearchDirectory,
 	DebugMode,
 	SaveAndExit,
 	ExitWithoutSaving,
@@ -26,6 +27,7 @@ public enum StartMenuAction
 	Continue,
 	Settings,
 	ChangeFilePath,
+	Search,
 	Help,
 	Exit,
 }
@@ -49,6 +51,7 @@ public static class Menu
 		new("Continue", Settings.Continue),
 		new("Show Translated Strings", Settings.ShowTranslated),
 		new("Change File Path", Settings.ChangeFilePath),
+		new("Change Search Directory", Settings.ChangeSearchDirectory),
 		new("Debug Mode", Settings.DebugMode),
 		new("Save And Exit", Settings.SaveAndExit),
 		new("Exit Without Saving", Settings.ExitWithoutSaving),
@@ -105,6 +108,10 @@ public static class Menu
 						break;
 					case Settings.ChangeFilePath:
 						config.LastFile = ChangeFilePath(configPath, config, false);
+						break;
+					case Settings.ChangeSearchDirectory:
+						config.SearchDirectory = ChangeSearchDirectory(config);
+						Config.Write(configPath, config);
 						break;
 					case Settings.DebugMode:
 						config.DebugMode = VisualOnOffMenu($"Debug Mode: {(config.DebugMode ? "[ON]" : "[OFF]")}");
@@ -171,6 +178,7 @@ public static class Menu
 				config.FirstTimeUsing ? StartMenuAction.Start : StartMenuAction.Continue),
 			new("Settings", StartMenuAction.Settings),
 			new("Change File Path", StartMenuAction.ChangeFilePath),
+			new("Search", StartMenuAction.Search),
 			new("Help", StartMenuAction.Help),
 			new("Exit", StartMenuAction.Exit),
 		};
@@ -195,6 +203,10 @@ public static class Menu
 				config.LastFile = ChangeFilePath(configPath, config, true);
 				return MenuResult.Continue;
 
+			case StartMenuAction.Search:
+				SearchMenu(configPath, config);
+				return MenuResult.Continue;
+
 			case StartMenuAction.Help:
 				AnsiConsole.Markup($"[Green]Escape[/]      - Save and exit\n" +
 								   $"[Green]\"{Document.ExitCommand}\"[/]      - Save and exit\n" +
@@ -208,6 +220,62 @@ public static class Menu
 				return VisualYesNoMenu("Are you sure you want to exit?") ? MenuResult.Exit : MenuResult.Continue;
 			default:
 				return MenuResult.Continue;
+		}
+	}
+
+	private static string? ChangeSearchDirectory(Config config)
+	{
+		Console.Clear();
+		AnsiConsole.WriteLine("Enter path to the game directory:");
+		return Tui.Input(config.SearchDirectory ?? "");
+	}
+
+	private static async void SearchMenu(string configPath, Config config)
+	{
+		try
+		{
+			Console.Clear();
+
+			if (!Search.IsRgAvailable())
+			{
+				AnsiConsole.MarkupLine("[Red]rg (ripgrep) is not installed or not found on PATH.[/]");
+				AnsiConsole.WriteLine("Press any key to continue...");
+				Console.ReadKey();
+				return;
+			}
+
+			if (string.IsNullOrWhiteSpace(config.SearchDirectory) || !Directory.Exists(config.SearchDirectory))
+			{
+				AnsiConsole.MarkupLine("[Yellow]Search directory not set or invalid.[/]");
+				var dir = Tui.Input("Enter path to the game directory:", config.SearchDirectory ?? "");
+				if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+				{
+					AnsiConsole.MarkupLine("[Red]Invalid directory.[/]");
+					AnsiConsole.WriteLine("Press any key to continue...");
+					Console.ReadKey();
+					return;
+				}
+
+				config.SearchDirectory = dir;
+				Config.Write(configPath, config);
+			}
+
+			Console.Clear();
+			var query = Tui.Input("Search query: ");
+			if (string.IsNullOrWhiteSpace(query))
+				return;
+
+			var results = await Search.SearchAsync(query, config.SearchDirectory!);
+
+			Console.Clear();
+			Search.DisplayResults(results, query);
+
+			AnsiConsole.WriteLine("\nPress any key to continue...");
+			Console.ReadKey();
+		}
+		catch (Exception)
+		{
+			//
 		}
 	}
 
