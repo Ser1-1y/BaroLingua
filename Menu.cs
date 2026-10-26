@@ -8,6 +8,18 @@ public enum MenuResult
 	Exit,
 }
 
+public enum YesNo
+{
+	Yes,
+	No,
+}
+
+public enum OnOff
+{
+	On,
+	Off,
+}
+
 public enum Settings
 {
 	Continue,
@@ -34,16 +46,16 @@ public enum StartMenuAction
 
 public static class Menu
 {
-	private static readonly Option<MenuResult>[] BoolChoice =
+	private static readonly Option<YesNo>[] YesNoChoice =
 	[
-		new("Yes", MenuResult.Continue),
-		new("No", MenuResult.Exit),
+		new("Yes", YesNo.Yes),
+		new("No", YesNo.No),
 	];
 
-	private static readonly Option<MenuResult>[] OnOffChoice =
+	private static readonly Option<OnOff>[] OnOffChoice =
 	[
-		new("On", MenuResult.Continue),
-		new("Off", MenuResult.Exit),
+		new("On", OnOff.On),
+		new("Off", OnOff.Off),
 	];
 
 	private static readonly Option<Settings>[] BaseSettingsChoice =
@@ -57,114 +69,135 @@ public static class Menu
 		new("Exit Without Saving", Settings.ExitWithoutSaving),
 	];
 
-	private static bool VisualYesNoMenu(string title) =>
-		Tui.ChoiceAsync(BoolChoice, title).Result == MenuResult.Continue;
+	private static bool YesNoMenu(string title, bool defaultYes = true) =>
+		Tui.Choice(YesNoChoice, title, defaultYes ? 0 : 1) == YesNo.Yes;
 
-	private static bool VisualOnOffMenu(string title) =>
-		Tui.ChoiceAsync(OnOffChoice, title).Result == MenuResult.Continue;
+	private static bool OnOffMenu(string title, bool current)
+	{
+		var choice = Tui.Choice(OnOffChoice, title, current ? 0 : 1);
+		return choice is null ? current : choice == OnOff.On;
+	}
 
-	public static void ConfigMenu(string configPath)
+	public static Config ConfigMenu(string configPath)
 	{
 		Console.Clear();
 		AnsiConsole.MarkupLine("[Red]No config file found[/]");
-		var choice = VisualYesNoMenu("Do you want to change the config now?");
+
 		var config = new Config();
-		if (choice)
+		if (YesNoMenu("Do you want to change the config now?"))
 			SettingsMenu(configPath, config);
-		else
+
+		if (!File.Exists(configPath) && !config.RestartRequested)
 			Config.Write(configPath, config);
+
+		return config;
 	}
 
-	public static async void SettingsMenu(string configPath, Config config)
+	public static void SettingsMenu(string configPath, Config config)
 	{
 		try
 		{
-			var loop = true;
-			while (loop)
+			var draft = config.Clone();
+
+			while (true)
 			{
 				Console.Clear();
 
 				var choices = new List<Option<Settings>>(BaseSettingsChoice);
 
-				if (config.DebugMode)
+				if (draft.DebugMode)
 				{
 					choices.Add(new Option<Settings>("Delete Config File", Settings.DeleteConfigFile));
 					choices.Add(new Option<Settings>("Show Original Nodes", Settings.ShowOriginalNodes));
 				}
 
-				var choice = await Tui.ChoiceAsync([.. choices], $"Settings v{config.Version}");
+				var choice = Tui.Choice([.. choices], $"Settings v{Config.CurrentVersion}") ?? Settings.Continue;
 
 				// ReSharper disable once SwitchStatementHandlesSomeKnownEnumValuesWithDefault
 				switch (choice)
 				{
 					case Settings.Continue:
-						Config.Write(configPath, config);
-						loop = false;
-						break;
-					case Settings.ShowTranslated:
-						config.ShowLoadedStrings =
-							VisualOnOffMenu(
-								$"Show translated strings: {(config.ShowLoadedStrings ? "[ON]" : "[OFF]")}");
-						break;
-					case Settings.ChangeFilePath:
-						config.LastFile = ChangeFilePath(configPath, config, false);
-						break;
-					case Settings.ChangeSearchDirectory:
-						config.SearchDirectory = ChangeSearchDirectory(config);
-						Config.Write(configPath, config);
-						break;
-					case Settings.DebugMode:
-						config.DebugMode = VisualOnOffMenu($"Debug Mode: {(config.DebugMode ? "[ON]" : "[OFF]")}");
-						break;
 					case Settings.SaveAndExit:
+						config.CopyFrom(draft);
 						Config.Write(configPath, config);
-						loop = false;
+						return;
+
+					case Settings.ShowTranslated:
+						draft.ShowLoadedStrings = OnOffMenu(
+							$"Show translated strings: {(draft.ShowLoadedStrings ? "[ON]" : "[OFF]")}",
+							draft.ShowLoadedStrings);
 						break;
+
+					case Settings.ChangeFilePath:
+						ChangeFilePath(draft);
+						break;
+
+					case Settings.ChangeSearchDirectory:
+						ChangeSearchDirectory(draft);
+						break;
+
+					case Settings.DebugMode:
+						draft.DebugMode = OnOffMenu(
+							$"Debug Mode: {(draft.DebugMode ? "[ON]" : "[OFF]")}",
+							draft.DebugMode);
+						break;
+
 					case Settings.ExitWithoutSaving:
-						if (VisualYesNoMenu("Are you sure you want to exit?"))
-							loop = false;
+						if (YesNoMenu("Discard your changes and leave settings?"))
+							return;
 						break;
+
 					case Settings.DeleteConfigFile:
-						if (VisualYesNoMenu(
-								"Are you sure you want to delete the config file?\nThis will restart the program."))
+						if (YesNoMenu(
+								"Are you sure you want to delete the config file?\nThis will restart the program.",
+								defaultYes: false))
 						{
 							File.Delete(configPath);
+							config.RestartRequested = true;
 							return;
 						}
 
 						break;
+
 					case Settings.ShowOriginalNodes:
-						config.ShowOriginalNodes =
-							VisualOnOffMenu($"Show original nodes: {(config.ShowOriginalNodes ? "[ON]" : "[OFF]")}");
+						draft.ShowOriginalNodes = OnOffMenu(
+							$"Show original nodes: {(draft.ShowOriginalNodes ? "[ON]" : "[OFF]")}",
+							draft.ShowOriginalNodes);
 						break;
 				}
 			}
 		}
-		catch (Exception)
+		catch (Exception ex)
 		{
-			//
+			Helpers.ShowError("Settings", ex);
 		}
 	}
-
-	private static string? ChangeFilePath(string configPath, Config config, bool startMenuAfter)
+	
+	private static void ChangeFilePath(Config config)
 	{
 		Console.Clear();
 		AnsiConsole.WriteLine("Enter path to the XML file:");
 
-		var newFilePath = Tui.Input(config.LastFile ?? "");
-		config.LastFile = newFilePath;
-
-		Config.Write(configPath, config);
-		if (startMenuAfter)
-			StartMenu(config);
-		return newFilePath;
+		var input = Helpers.StripQuotes(Tui.Input(defaultText: config.LastFile ?? ""));
+		if (input.Length > 0)
+			config.LastFile = input;
 	}
 
-	public static string? ChangeFilePath()
+	private static void ChangeSearchDirectory(Config config)
+	{
+		Console.Clear();
+		AnsiConsole.WriteLine("Enter path to the game directory:");
+
+		var input = Helpers.StripQuotes(Tui.Input(defaultText: config.SearchDirectory ?? ""));
+		if (input.Length > 0)
+			config.SearchDirectory = input;
+	}
+
+	public static string? PromptFilePath(string? defaultText = null)
 	{
 		Console.Clear();
 		AnsiConsole.WriteLine("Enter path to the XML file:");
-		return Tui.Input();
+		return Tui.Input(defaultText: defaultText ?? "");
 	}
 
 	public static MenuResult StartMenu(Config config)
@@ -183,7 +216,7 @@ public static class Menu
 			new("Exit", StartMenuAction.Exit),
 		};
 
-		var choice = Tui.ChoiceAsync(startOptions, "Menu").Result;
+		var choice = Tui.Choice(startOptions, "Menu");
 
 		switch (choice)
 		{
@@ -200,7 +233,8 @@ public static class Menu
 				return MenuResult.Continue;
 
 			case StartMenuAction.ChangeFilePath:
-				config.LastFile = ChangeFilePath(configPath, config, true);
+				ChangeFilePath(config);
+				Config.Write(configPath, config);
 				return MenuResult.Continue;
 
 			case StartMenuAction.Search:
@@ -208,29 +242,30 @@ public static class Menu
 				return MenuResult.Continue;
 
 			case StartMenuAction.Help:
-				AnsiConsole.Markup($"[Green]Escape[/]      - Save and exit\n" +
-								   $"[Green]\"{Document.ExitCommand}\"[/]      - Save and exit\n" +
-								   $"[Green]\"{Document.SettingsCommand}\"[/] - Access Settings\n");
-				AnsiConsole.WriteLine("Press any key to continue...");
-				Console.ReadKey();
+				ShowHelp();
 				return MenuResult.Continue;
 
 			case StartMenuAction.Exit:
 			case null:
-				return VisualYesNoMenu("Are you sure you want to exit?") ? MenuResult.Exit : MenuResult.Continue;
+				return YesNoMenu("Are you sure you want to exit?") ? MenuResult.Exit : MenuResult.Continue;
 			default:
 				return MenuResult.Continue;
 		}
 	}
 
-	private static string? ChangeSearchDirectory(Config config)
+	private static void ShowHelp()
 	{
-		Console.Clear();
-		AnsiConsole.WriteLine("Enter path to the game directory:");
-		return Tui.Input(config.SearchDirectory ?? "");
+		AnsiConsole.Markup($"[Green]Escape[/]      - Save and exit\n" +
+						   $"[Green]Ctrl+C[/]      - Save and exit immediately\n" +
+						   $"[Green]\"{Document.ExitCommand}\"[/]     - Save and exit\n" +
+						   $"[Green]\"{Document.SettingsCommand}\"[/] - Access Settings\n" +
+						   $"[Green]\"{Document.UndoCommand}\"[/]     - Undo line\n" +
+						   $"[Green]Enter on empty[/] - Skip\n" +
+						   $"[Green]\\/text[/]      - Type a literal \"/text\" ");
+		Helpers.Pause();
 	}
 
-	private static async void SearchMenu(string configPath, Config config)
+	private static void SearchMenu(string configPath, Config config)
 	{
 		try
 		{
@@ -238,21 +273,20 @@ public static class Menu
 
 			if (!Search.IsRgAvailable())
 			{
-				AnsiConsole.MarkupLine("[Red]rg (ripgrep) is not installed or not found on PATH.[/]");
-				AnsiConsole.WriteLine("Press any key to continue...");
-				Console.ReadKey();
+				AnsiConsole.MarkupLine("[Red]rg not found in PATH.[/]");
+				Helpers.Pause();
 				return;
 			}
 
 			if (string.IsNullOrWhiteSpace(config.SearchDirectory) || !Directory.Exists(config.SearchDirectory))
 			{
-				AnsiConsole.MarkupLine("[Yellow]Search directory not set or invalid.[/]");
-				var dir = Tui.Input("Enter path to the game directory:", config.SearchDirectory ?? "");
-				if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+				AnsiConsole.MarkupLine("[Yellow]Search directory invalid.[/]");
+				var dir = Helpers.StripQuotes(
+					Tui.Input("Enter path to the game directory: ", config.SearchDirectory ?? ""));
+				if (dir.Length == 0 || !Directory.Exists(dir))
 				{
 					AnsiConsole.MarkupLine("[Red]Invalid directory.[/]");
-					AnsiConsole.WriteLine("Press any key to continue...");
-					Console.ReadKey();
+					Helpers.Pause();
 					return;
 				}
 
@@ -265,23 +299,20 @@ public static class Menu
 			if (string.IsNullOrWhiteSpace(query))
 				return;
 
-			var results = await Search.SearchAsync(query, config.SearchDirectory!);
+			AnsiConsole.MarkupLine("[Grey]Searching...[/]");
+			var outcome = Search.SearchAsync(query, config.SearchDirectory!).GetAwaiter().GetResult();
 
-			Console.Clear();
-			Search.DisplayResults(results, query);
-
-			AnsiConsole.WriteLine("\nPress any key to continue...");
-			Console.ReadKey();
+			Search.DisplayResults(outcome, query);
 		}
-		catch (Exception)
+		catch (Exception ex)
 		{
-			//
+			Helpers.ShowError("Search", ex);
 		}
 	}
 
 	public static bool ExitMenu()
 	{
 		Console.Clear();
-		return VisualYesNoMenu("Are you sure you want to exit?");
+		return YesNoMenu("Are you sure you want to exit?");
 	}
 }

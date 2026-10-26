@@ -1,4 +1,6 @@
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 
 namespace Translate;
 
@@ -13,9 +15,10 @@ public record CommandResult(int ExitCode, string StandardOutput, string Standard
 	public bool IsSuccess => ExitCode == 0;
 }
 
-public static class Bash
+public static class ProcessRunner
 {
 	private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(2);
+	private static readonly TimeSpan DrainGracePeriod = TimeSpan.FromSeconds(2);
 
 	public static async Task<CommandResult> ExecuteAsync(
 		Command command,
@@ -31,6 +34,9 @@ public static class Bash
 			UseShellExecute = false,
 			RedirectStandardOutput = true,
 			RedirectStandardError = true,
+			// Windows
+			StandardOutputEncoding = Encoding.UTF8,
+			StandardErrorEncoding = Encoding.UTF8,
 			CreateNoWindow = true,
 		};
 
@@ -51,11 +57,18 @@ public static class Bash
 
 		try
 		{
-			if (!process.Start())
-				return new CommandResult(-1, string.Empty, "Failed to start process.");
+			try
+			{
+				if (!process.Start())
+					return new CommandResult(-1, string.Empty, "Failed to start process.");
+			}
+			catch (Win32Exception ex)
+			{
+				return new CommandResult(-1, string.Empty, $"Failed to start '{command.FileName}': {ex.Message}");
+			}
 
-			var stdoutTask = process.StandardOutput.ReadToEndAsync(linkedCts.Token);
-			var stderrTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
+			var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+			var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
 
 			try
 			{
@@ -70,45 +83,10 @@ public static class Bash
 					? $"Command timed out after {DefaultTimeout.TotalSeconds} seconds."
 					: "Command was cancelled.";
 
-				try
-				{
-					if (!process.HasExited)
-						process.Kill(true);
-				}
-				catch
-				{
-					//
-				}
+				TryKill(process);
 
-				try
-				{
-					await process.WaitForExitAsync(CancellationToken.None);
-				}
-				catch
-				{
-					//
-				}
-
-				string stdout;
-				string stderr;
-
-				try
-				{
-					stdout = await stdoutTask;
-				}
-				catch
-				{
-					stdout = string.Empty;
-				}
-
-				try
-				{
-					stderr = await stderrTask;
-				}
-				catch
-				{
-					stderr = string.Empty;
-				}
+				var stdout = await DrainAsync(stdoutTask);
+				var stderr = await DrainAsync(stderrTask);
 
 				return new CommandResult(
 					-1,
@@ -126,47 +104,42 @@ public static class Bash
 		}
 		catch (Exception ex)
 		{
-			try
-			{
-				if (!process.HasExited)
-					process.Kill(true);
-			}
-			catch
-			{
-				//
-			}
-
+			TryKill(process);
+			Logger.Log($"Running '{command.FileName}'", ex);
 			return new CommandResult(-1, string.Empty, ex.ToString());
 		}
 	}
 
-	public static bool CommandExists(string command)
+	private static void TryKill(Process process)
 	{
-		var psi = new ProcessStartInfo
+		try
 		{
-			FileName = "/bin/bash",
-			UseShellExecute = false,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true,
-		};
+			if (!process.HasExited)
+				process.Kill(true);
+		}
+		catch (InvalidOperationException)
+		{
+		}
+		catch (Win32Exception ex)
+		{
+			Logger.Log("Killing process", ex);
+		}
+	}
 
-		psi.ArgumentList.Add("-c");
-		psi.ArgumentList.Add($"command -v '{command.Replace("'", "'\\''")}'");
+	private static async Task<string> DrainAsync(Task<string> readTask)
+	{
+		var finished = await Task.WhenAny(readTask, Task.Delay(DrainGracePeriod));
+		if (finished != readTask)
+			return string.Empty;
 
 		try
 		{
-			using var process = Process.Start(psi);
-
-			if (process == null)
-				return false;
-
-			process.WaitForExit();
-
-			return process.ExitCode == 0;
+			return await readTask;
 		}
-		catch
+		catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
 		{
-			return false;
+			Logger.Log("Reading process output", ex);
+			return string.Empty;
 		}
 	}
 }

@@ -7,18 +7,17 @@ public static class Tui
 {
 	public static bool ShowMenuNumbers { get; set; } = true;
 
-	public static async Task<T?> ChoiceAsync<T>(Option<T>[] options, string title = "",
-		bool titlePadding = false, CancellationToken ct = default)
+	public static T? Choice<T>(Option<T>[] options, string title = "", int defaultIndex = 0,
+		bool titlePadding = false)
 		where T : struct, Enum
 	{
 		var stringOptions = options.Select(o => o.Title).ToArray();
-		var index = await RunMenuAsync(stringOptions, 0, title, titlePadding, ct);
+		var index = RunMenu(stringOptions, defaultIndex, title, titlePadding);
 
 		return index.HasValue ? options[index.Value].Id : null;
 	}
 
-	private static async Task<int?> RunMenuAsync(string[] options, int defaultIndex, string title, bool titlePadding,
-		CancellationToken ct)
+	private static int? RunMenu(string[] options, int defaultIndex, string title, bool titlePadding)
 	{
 		if (options.Length == 0 || options.All(string.IsNullOrEmpty))
 			return null;
@@ -37,13 +36,12 @@ public static class Tui
 		{
 			while (true)
 			{
-				ct.ThrowIfCancellationRequested();
 				Console.SetCursorPosition(0, startTop);
 
 				if (!string.IsNullOrWhiteSpace(title))
 				{
 					var displayTitle = titlePadding ? $"--- {title} ---" : title;
-					AnsiConsole.MarkupLine(displayTitle);
+					AnsiConsole.MarkupLine(Markup.Escape(displayTitle));
 				}
 
 				var consoleWidth = Console.IsOutputRedirected ? 80 : Console.WindowWidth;
@@ -76,18 +74,11 @@ public static class Tui
 					displayNumber++;
 				}
 
-				while (!Console.KeyAvailable)
-				{
-					await Task.Delay(20, ct);
-					ct.ThrowIfCancellationRequested();
-				}
-
 				var key = Console.ReadKey(true);
 
-				if (key.Key == ConsoleKey.Escape
-					|| (key.Modifiers.HasFlag(ConsoleModifiers.Control)
-						&& key.Key == ConsoleKey.C))
+				if (key.Key == ConsoleKey.Escape)
 					return null;
+
 				switch (key.Key)
 				{
 					case ConsoleKey.Enter:
@@ -152,10 +143,6 @@ public static class Tui
 					return targetIndex;
 			}
 		}
-		catch (OperationCanceledException)
-		{
-			return null;
-		}
 		finally
 		{
 			Console.CursorVisible = true;
@@ -212,16 +199,34 @@ public static class Tui
 	{
 		var buffer = new StringBuilder(defaultText);
 		var cursorPos = buffer.Length;
+		var viewStart = 0;
+		var top = Console.CursorTop;
 
-		void RedrawInput()
+		void Redraw()
 		{
+			var width = Math.Max(Math.Min(Console.BufferWidth, Console.WindowWidth), 12);
+
+			var shownTitle = title.Length > width - 10 ? title[^(width - 10)..] : title;
+
+			var available = width - shownTitle.Length - 1;
+
+			viewStart = Math.Min(viewStart, Math.Max(0, buffer.Length - available));
+			if (cursorPos < viewStart)
+				viewStart = cursorPos;
+			else if (cursorPos - viewStart > available)
+				viewStart = cursorPos - available;
+
+			var visible = buffer.ToString(viewStart, Math.Min(available, buffer.Length - viewStart));
+
+			top = Math.Min(top, Console.BufferHeight - 1);
 			Console.CursorVisible = false;
-			Console.Write($"\r{title}{buffer}\e[K");
-			Console.SetCursorPosition(title.Length + cursorPos, Console.CursorTop);
+			Console.SetCursorPosition(0, top);
+			Console.Write((shownTitle + visible).PadRight(width - 1));
+			Console.SetCursorPosition(shownTitle.Length + cursorPos - viewStart, top);
 			Console.CursorVisible = true;
 		}
 
-		RedrawInput();
+		Redraw();
 
 		while (true)
 		{
@@ -238,17 +243,12 @@ public static class Tui
 					Console.CursorVisible = true;
 					return escapeValue;
 
-				case ConsoleKey.C when (key.Modifiers & ConsoleModifiers.Control) != 0:
-					Console.WriteLine();
-					Console.CursorVisible = true;
-					return null;
-
 				case ConsoleKey.Backspace:
 					if (cursorPos > 0)
 					{
 						buffer.Remove(cursorPos - 1, 1);
 						cursorPos--;
-						RedrawInput();
+						Redraw();
 					}
 
 					break;
@@ -257,7 +257,7 @@ public static class Tui
 					if (cursorPos < buffer.Length)
 					{
 						buffer.Remove(cursorPos, 1);
-						RedrawInput();
+						Redraw();
 					}
 
 					break;
@@ -266,7 +266,7 @@ public static class Tui
 					if (cursorPos > 0)
 					{
 						cursorPos--;
-						RedrawInput();
+						Redraw();
 					}
 
 					break;
@@ -275,19 +275,19 @@ public static class Tui
 					if (cursorPos < buffer.Length)
 					{
 						cursorPos++;
-						RedrawInput();
+						Redraw();
 					}
 
 					break;
 
 				case ConsoleKey.Home:
 					cursorPos = 0;
-					RedrawInput();
+					Redraw();
 					break;
 
 				case ConsoleKey.End:
 					cursorPos = buffer.Length;
-					RedrawInput();
+					Redraw();
 					break;
 
 				case ConsoleKey.Tab:
@@ -298,7 +298,7 @@ public static class Tui
 					{
 						buffer.Insert(cursorPos, key.KeyChar);
 						cursorPos++;
-						RedrawInput();
+						Redraw();
 					}
 
 					break;

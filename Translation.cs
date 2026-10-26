@@ -1,5 +1,4 @@
-﻿using System.Text.RegularExpressions;
-using System.Xml;
+﻿using System.Xml;
 using Spectre.Console;
 
 namespace Translate;
@@ -15,13 +14,12 @@ internal static class Document
 {
 	public const string ExitCommand = "/exit";
 	public const string SettingsCommand = "/settings";
+	public const string UndoCommand = "/undo";
 
-	internal static void Save(string filePath, string configPath, Config config, XmlDocument xmlDoc)
-	{
-		config.LastFile = filePath;
-		Config.Write(configPath, config);
-		xmlDoc.Save(filePath);
-	}
+	public const string LiteralPrefix = @"\/";
+
+	internal static void Save(string filePath, XmlDocument xmlDoc) =>
+		Helpers.WriteAtomic(filePath, xmlDoc.Save);
 
 	public static XmlDocument Load(string filePath)
 	{
@@ -39,9 +37,16 @@ internal static class Document
 			Console.WriteLine(tags != null ? $" speakertags=\"{tags.Value}\">" : ">");
 		}
 
-		AnsiConsole.Markup(
-			$"{prefix.Branch}[Green]Original:[/] {original} | [Green]Speaker:[/] \"{node.Attributes?["speaker"]?.Value}\"");
-		AnsiConsole.MarkupLine(tags != null ? $" [Green]Tags:[/] {tags.Value}" : "");
+		var speaker = node.Attributes?["speaker"]?.Value ?? "";
+
+		var header =
+			$"{Markup.Escape(prefix.Branch)}[Green]Original:[/] {Markup.Escape(original)} | " +
+			$"[Green]Speaker:[/] \"{Markup.Escape(speaker)}\"";
+
+		if (tags != null)
+			header += $" [Green]Tags:[/] {Markup.Escape(tags.Value)}";
+
+		AnsiConsole.MarkupLine(header);
 
 		return Tui.Input(prefix.Continuation, escapeValue: ExitCommand);
 	}
@@ -52,9 +57,10 @@ internal static class Document
 		{
 			var prefix = tree.PrefixFor(ancestor);
 			var text = ancestor.Attributes?["line"]?.Value ?? "";
-			var speaker = ancestor.Attributes?["speaker"]?.Value;
+			var speaker = ancestor.Attributes?["speaker"]?.Value ?? "";
 			AnsiConsole.MarkupLine(
-				$"{prefix.Branch}[Green]{text.EscapeMarkup()}[/] | [Green]Speaker:[/] \"{speaker}\"");
+				$"{Markup.Escape(prefix.Branch)}[Green]{Markup.Escape(text)}[/] | " +
+				$"[Green]Speaker:[/] \"{Markup.Escape(speaker)}\"");
 		}
 	}
 }
@@ -139,33 +145,59 @@ internal sealed class ConversationTree
 
 public static class Translation
 {
-	private static readonly Regex Cyrillic = Count.CyrillicRegex();
-	private static readonly Regex NumbersAndDots = Count.NumbersAndDotsRegex();
+	private const int AutosaveEvery = 10;
 
 	public static TranslationResult Process(string filePath, Config config, string configPath)
 	{
 		Console.Clear();
 
-		var xmlDoc = Document.Load(filePath);
+		XmlDocument xmlDoc;
+		try
+		{
+			xmlDoc = Document.Load(filePath);
+		}
+		catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
+		{
+			Helpers.ShowError($"Loading {filePath}", ex);
+			return TranslationResult.BackToMenu;
+		}
+
 		config.FirstTimeUsing = false;
 
 		var conversationNodes = xmlDoc.SelectNodes("//Conversation")?.Cast<XmlNode>().ToList();
 		if (conversationNodes is null or { Count: 0 })
 		{
-			Console.WriteLine("[ERROR] There are no nodes.");
+			Console.WriteLine("[ERROR] No nodes found.");
 			config.LastFile = null;
 			Config.Write(configPath, config);
-			Console.ReadKey();
+			Helpers.Pause();
 			return TranslationResult.BackToMenu;
 		}
 
+		Session.Begin(filePath, configPath, config, xmlDoc);
+		try
+		{
+			return RunLoop(filePath, configPath, config, xmlDoc, conversationNodes);
+		}
+		finally
+		{
+			Session.End();
+		}
+	}
+
+	private static TranslationResult RunLoop(string filePath, string configPath, Config config,
+		XmlDocument xmlDoc, List<XmlNode> conversationNodes)
+	{
 		var tree = ConversationTree.Build(conversationNodes);
 		var startTime = DateTime.Now;
 		var translatedLinesCount = 0;
+		var linesSinceAutosave = 0;
 		var contextShown = false;
+		var history = new Stack<HistoryEntry>();
 
-		foreach (var conv in conversationNodes)
+		for (var i = 0; i < conversationNodes.Count; i++)
 		{
+			var conv = conversationNodes[i];
 			var line = conv.Attributes?["line"];
 			if (ShouldSkipLine(line, config))
 				continue;
@@ -178,28 +210,60 @@ public static class Translation
 
 			var tags = conv.Attributes?["speakertags"];
 			var prefix = tree.PrefixFor(conv);
+			var originalValue = line!.Value;
 
-			switch (TranslateOneLine(conv, line!, tags, config, prefix))
+			switch (TranslateOneLine(conv, line, tags, config, prefix))
 			{
 				case LineOutcome.Translated:
+					history.Push(new HistoryEntry(i, line, originalValue));
 					translatedLinesCount++;
-					continue;
+
+					if (++linesSinceAutosave >= AutosaveEvery)
+					{
+						Session.Save();
+						linesSinceAutosave = 0;
+					}
+
+					break;
+
+				case LineOutcome.Skipped:
+					break;
+
+				case LineOutcome.Undo:
+					if (history.TryPop(out var last))
+					{
+						var attribute = last.Attribute;
+						var restore = last.OriginalValue;
+						Session.Edit(() => attribute.Value = restore);
+						translatedLinesCount--;
+
+						i = last.Index - 1;
+						contextShown = false;
+						Console.Clear();
+					}
+					else
+					{
+						Console.WriteLine("Nothing to undo.");
+						i--; // Same line.
+					}
+
+					break;
 
 				case LineOutcome.OpenSettings:
-					Document.Save(filePath, configPath, config, xmlDoc);
+					Session.Save();
 					Menu.SettingsMenu(configPath, config);
 					return TranslationResult.BackToMenu;
 
 				case LineOutcome.Exit:
 					Console.Clear();
-					Document.Save(filePath, configPath, config, xmlDoc);
-					GetResults(filePath, translatedLinesCount, startTime);
+					Session.Save();
+					GetResults(filePath, xmlDoc, translatedLinesCount, startTime);
 					return TranslationResult.ExitRequested;
 			}
 		}
 
-		Document.Save(filePath, configPath, config, xmlDoc);
-		GetResults(filePath, translatedLinesCount, startTime);
+		Session.Save();
+		GetResults(filePath, xmlDoc, translatedLinesCount, startTime);
 		return TranslationResult.Completed;
 	}
 
@@ -210,7 +274,7 @@ public static class Translation
 		{
 			var input = Document.WriteXmlLine(line.Value, tags, config.ShowOriginalNodes, conv, prefix);
 
-			if (input is null or Document.ExitCommand)
+			if (input is null || input.Trim().Equals(Document.ExitCommand, StringComparison.OrdinalIgnoreCase))
 			{
 				if (Menu.ExitMenu())
 					return LineOutcome.Exit;
@@ -219,21 +283,33 @@ public static class Translation
 				continue;
 			}
 
-			if (input.Equals(Document.SettingsCommand, StringComparison.OrdinalIgnoreCase))
+			var command = input.Trim();
+
+			if (command.Equals(Document.SettingsCommand, StringComparison.OrdinalIgnoreCase))
 				return LineOutcome.OpenSettings;
 
-			line.Value = input;
+			if (command.Equals(Document.UndoCommand, StringComparison.OrdinalIgnoreCase))
+				return LineOutcome.Undo;
+
+			if (command.Length == 0)
+				return LineOutcome.Skipped;
+
+			// "\/exit"
+			if (input.StartsWith(Document.LiteralPrefix, StringComparison.Ordinal))
+				input = input[1..];
+
+			var translated = input;
+			Session.Edit(() => line.Value = translated);
 			return LineOutcome.Translated;
 		}
 	}
 
 	private static bool ShouldSkipLine(XmlAttribute? line, Config config)
 	{
-		if (line == null || string.IsNullOrWhiteSpace(line.Value) || line.Value == "..." ||
-			NumbersAndDots.IsMatch(line.Value))
+		if (line == null || Count.IsIgnorable(line.Value))
 			return true;
 
-		if (!Cyrillic.IsMatch(line.Value))
+		if (!Count.IsTranslated(line.Value))
 			return false;
 
 		if (config.ShowLoadedStrings)
@@ -241,26 +317,31 @@ public static class Translation
 		return true;
 	}
 
-	private static void GetResults(string filePath, int translatedLinesCount, DateTime startTime)
+	private static void GetResults(string filePath, XmlDocument xmlDoc, int translatedLinesCount,
+		DateTime startTime)
 	{
-		var transLines = Count.Translated(filePath);
-		var engLines = Count.English(filePath);
+		var transLines = Count.Translated(xmlDoc);
+		var engLines = Count.English(xmlDoc);
 
 		var elapsed = DateTime.Now - startTime;
 		var secPerLine = translatedLinesCount > 0 ? Math.Round(elapsed.TotalSeconds / translatedLinesCount, 1) : 0;
 
-		AnsiConsole.MarkupLine($"Saved as [Green]{filePath}[/]");
+		AnsiConsole.MarkupLine($"Saved as [Green]{Markup.Escape(filePath)}[/]");
 		AnsiConsole.MarkupLine($"Translated [Green]{translatedLinesCount}[/] lines, [Green]{transLines}[/] in total.");
 		AnsiConsole.MarkupLine($"[Green]{engLines}[/] English lines left.");
 		AnsiConsole.MarkupLine($"Time: [Green]{elapsed.TotalMinutes:F1}[/] minutes.");
 		AnsiConsole.MarkupLine($"≈ [Green]{secPerLine}[/] sec/line.");
 
-		Console.ReadKey();
+		Helpers.Pause();
 	}
+
+	private readonly record struct HistoryEntry(int Index, XmlAttribute Attribute, string OriginalValue);
 
 	private enum LineOutcome
 	{
 		Translated,
+		Skipped,
+		Undo,
 		OpenSettings,
 		Exit,
 	}

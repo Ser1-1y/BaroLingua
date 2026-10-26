@@ -5,26 +5,31 @@ namespace Translate;
 
 public static partial class Count
 {
-	public static int English(string path) => CountLines(path, false);
-	public static int Translated(string path) => CountLines(path, true);
+	public static int English(XmlDocument doc) =>
+		CountLines(doc, line => !IsIgnorable(line) && !IsTranslated(line));
 
-	private static int CountLines(string path, bool cyrillic)
+	public static int Translated(XmlDocument doc) =>
+		CountLines(doc, IsTranslated);
+
+	public static bool IsIgnorable(string? line) =>
+		string.IsNullOrWhiteSpace(line) || NumbersAndDotsRegex().IsMatch(line);
+
+	public static bool IsTranslated(string? line) =>
+		!string.IsNullOrEmpty(line) && CyrillicRegex().IsMatch(line);
+
+	private static int CountLines(XmlDocument doc, Func<string?, bool> predicate)
 	{
-		var nodes = Document.Load(path);
-		var conversations = nodes.SelectNodes("//Conversation");
+		var conversations = doc.SelectNodes("//Conversation");
 		if (conversations is null)
 			return 0;
 
-		return conversations.Cast<XmlNode>().Count(node =>
-		{
-			var line = node.Attributes?["line"]?.Value ?? "";
-			return CyrillicRegex().IsMatch(line) == cyrillic;
-		});
+		return conversations.Cast<XmlNode>()
+							.Count(node => predicate(node.Attributes?["line"]?.Value));
 	}
 
 	[GeneratedRegex(@"\p{IsCyrillic}")]
 	public static partial Regex CyrillicRegex();
 
-	[GeneratedRegex("^[0-9.]+$")]
+	[GeneratedRegex(@"\A[0-9.]+\z")]
 	public static partial Regex NumbersAndDotsRegex();
 }
